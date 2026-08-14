@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Keyless Solana Pay request and confirmation verifier for supervised agents.">
+  <title>Solana Pay Agent Terminal</title>
+  <style>
+    :root { color-scheme: dark; --bg:#07111f; --panel:#0e1c31; --line:#203451; --text:#e8f0ff; --muted:#91a4c3; --accent:#54c7ff; --good:#67e8a5; --bad:#ff8f9b; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; color:var(--text); background:radial-gradient(circle at 20% 0%,#17345c 0,#07111f 48%); }
+    main { width:min(960px,calc(100% - 32px)); margin:0 auto; padding:48px 0 64px; }
+    header { margin-bottom:28px; }
+    h1 { margin:0 0 8px; font-size:clamp(2rem,5vw,3.5rem); letter-spacing:-.04em; }
+    h2 { margin:0 0 14px; font-size:1.2rem; }
+    p { color:var(--muted); }
+    .badge { display:inline-block; padding:4px 9px; border:1px solid #2c5d79; border-radius:999px; color:var(--accent); font-size:.78rem; letter-spacing:.08em; text-transform:uppercase; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:18px; }
+    .card { padding:22px; border:1px solid var(--line); border-radius:16px; background:color-mix(in srgb,var(--panel) 92%,transparent); box-shadow:0 16px 50px #0003; }
+    label { display:block; margin:13px 0 6px; color:var(--muted); font-size:.88rem; }
+    input,textarea,button { width:100%; border-radius:9px; border:1px solid var(--line); padding:11px 12px; font:inherit; }
+    input,textarea { color:var(--text); background:#081426; }
+    textarea { min-height:100px; resize:vertical; }
+    button { margin-top:16px; color:#03111d; background:var(--accent); border-color:transparent; font-weight:700; cursor:pointer; }
+    button.secondary { color:var(--text); background:#172b49; border-color:#2b4770; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    .row { display:flex; gap:10px; align-items:end; }
+    .row > * { flex:1; }
+    .result { margin-top:16px; padding:14px; border:1px dashed #2c5d79; border-radius:10px; overflow-wrap:anywhere; }
+    .result strong { color:var(--good); }
+    .result.error strong { color:var(--bad); }
+    code { color:#bceaff; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.88em; }
+    footer { margin-top:20px; color:var(--muted); font-size:.88rem; }
+    @media (max-width:540px) { main { width:min(100% - 20px,960px); padding-top:28px; } .row { display:block; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <span class="badge">Keyless Â· T0/T1 custody</span>
+      <h1>Solana Pay Agent Terminal</h1>
+      <p>Create a capped, unsigned payment request and verify the exact confirmed transfer. This page never asks for a seed phrase, signs, broadcasts, or refunds.</p>
+    </header>
+
+    <section class="grid" aria-label="Payment tools">
+      <article class="card">
+        <h2>1. Create request</h2>
+        <label for="recipient">Fixed recipient public key</label>
+        <input id="recipient" autocomplete="off" value="11111111111111111111111111111111">
+        <div class="row">
+          <div><label for="amount">Amount (SOL)</label><input id="amount" inputmode="decimal" value="0.000001"></div>
+          <div><label for="cap">Hard cap (SOL)</label><input id="cap" inputmode="decimal" value="0.01"></div>
+        </div>
+        <label for="memo">Memo (optional)</label>
+        <input id="memo" maxlength="256" value="agent invoice">
+        <button id="create">Generate unsigned request</button>
+        <div id="requestResult" class="result" role="status">No request generated yet.</div>
+      </article>
+
+      <article class="card">
+        <h2>2. Verify confirmed payment</h2>
+        <label for="rpc">Solana JSON-RPC URL</label>
+        <input id="rpc" value="https://api.devnet.solana.com" spellcheck="false">
+        <label for="reference">Reference from the request</label>
+        <input id="reference" placeholder="Generated after step 1" spellcheck="false">
+        <label for="expected">Expected amount (SOL)</label>
+        <input id="expected" inputmode="decimal" value="0.000001">
+        <button id="verify" class="secondary">Verify through RPC</button>
+        <div id="verifyResult" class="result" role="status">Verification has not run.</div>
+      </article>
+    </section>
+    <footer>Open-source demo for supervised agent workflows. Use a test recipient and devnet first. RPC responses are reduced to the fields the operator needs.</footer>
+  </main>
+
+  <script>
+    const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    const index = new Map([...alphabet].map((c, i) => [c, i]));
+    const $ = (id) => document.getElementById(id);
+    const result = (node, html, error = false) => { node.innerHTML = html; node.classList.toggle("error", error); };
+
+    function encode58(bytes) {
+      let zeros = 0; while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+      const digits = [0];
+      for (const byte of bytes) {
+        let carry = byte;
+        for (let i = 0; i < digits.length; i++) { const value = digits[i] * 256 + carry; digits[i] = value % 58; carry = Math.floor(value / 58); }
+        while (carry) { digits.push(carry % 58); carry = Math.floor(carry / 58); }
+      }
+      return "1".repeat(zeros) + digits.reverse().map((d) => alphabet[d]).join("");
+    }
+    function decode58(value) {
+      if (!value) return null; let zeros = 0; while (zeros < value.length && value[zeros] === "1") zeros++;
+      const bytes = [0];
+      for (const c of value) { const digit = index.get(c); if (digit === undefined) return null; let carry = digit;
+        for (let i = 0; i < bytes.length; i++) { const n = bytes[i] * 58 + carry; bytes[i] = n & 255; carry = n >> 8; }
+        while (carry) { bytes.push(carry & 255); carry >>= 8; }
+      }
+      const significant = bytes[0] === 0 ? bytes.slice(1) : bytes;
+      return new Uint8Array([...new Uint8Array(zeros), ...significant.reverse()]);
+    }
+    const validKey = (value) => decode58(value)?.length === 32;
+    function lamports(text) {
+      const match = /^(0|[1-9]\d*)(?:\.(\d{1,9}))?$/.exec(String(text).trim());
+      if (!match) throw new Error("Use a non-negative decimal with at most 9 decimals.");
+      return BigInt(match[1]) * 1000000000n + BigInt((match[2] || "").padEnd(9, "0") || "0");
+    }
+    function sol(value) { const n = BigInt(value); const whole = n / 1000000000n; const fraction = (n % 1000000000n).toString().padStart(9,"0").replace(/0+$/,""); return fraction ? `${whole}.${fraction}` : String(whole); }
+
+    $("create").onclick = () => {
+      try {
+        const recipient = $("recipient").value.trim(); const amount = lamports($("amount").value); const cap = lamports($("cap").value);
+        if (!validKey(recipient)) throw new Error("Recipient must be a 32-byte base58 public key.");
+        if (amount <= 0n || amount > cap) throw new Error(`Amount must be greater than zero and no more than ${sol(cap)} SOL.`);
+        const bytes = crypto.getRandomValues(new Uint8Array(32)); const reference = encode58(bytes);
+        const params = new URLSearchParams({ amount: sol(amount), label: "Agent payment", reference }); const memo = $("memo").value.trim(); if (memo) params.set("memo", memo);
+        $("reference").value = reference; $("expected").value = sol(amount);
+        result($("requestResult"), `<strong>Unsigned request ready</strong><br><code id="uri"></code><br><button id="copy" class="secondary">Copy URI</button>`);
+        $("uri").textContent = `solana:${recipient}?${params}`;
+        $("copy").onclick = async () => { await navigator.clipboard.writeText($("uri").textContent); $("copy").textContent = "Copied"; };
+      } catch (error) { result($("requestResult"), `<strong>Error</strong><br>${error.message}`, true); }
+    };
+
+    $("verify").onclick = async () => {
+      const node = $("verify"); node.disabled = true; result($("verifyResult"), "Checking confirmed signaturesâ€¦");
+      try {
+        const recipient = $("recipient").value.trim(); const reference = $("reference").value.trim(); const expected = lamports($("expected").value); const rpc = $("rpc").value.trim();
+        if (!validKey(recipient) || !validKey(reference)) throw new Error("Recipient and reference must be valid 32-byte base58 keys.");
+        const call = async (method, params) => { const response = await fetch(rpc, { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({jsonrpc:"2.0",id:1,method,params}) }); if (!response.ok) throw new Error(`RPC HTTP ${response.status}`); const body = await response.json(); if (body.error) throw new Error(body.error.message || "RPC error"); return body.result; };
+        const signatures = await call("getSignaturesForAddress", [reference, { commitment:"confirmed", limit:20 }]);
+        for (const entry of signatures || []) {
+          if (entry.err) continue; const tx = await call("getParsedTransaction", [entry.signature, { commitment:"confirmed", maxSupportedTransactionVersion:0 }]);
+          if (!tx || tx.meta?.err) continue; const keys = (tx.transaction?.message?.accountKeys || []).map((k) => typeof k === "string" ? k : k.pubkey); if (!keys.includes(reference)) continue;
+          const received = (tx.transaction?.message?.instructions || []).filter((i) => i.program === "system" && i.parsed?.type === "transfer" && i.parsed.info?.destination === recipient && Number.isSafeInteger(i.parsed.info?.lamports)).reduce((n, i) => n + BigInt(i.parsed.info.lamports), 0n);
+          if (received >= expected) { result($("verifyResult"), `<strong>Payment confirmed</strong><br>${sol(received)} SOL Â· signature <code>${entry.signature}</code>`); return; }
+        }
+        result($("verifyResult"), "No matching confirmed payment found yet.", true);
+      } catch (error) { result($("verifyResult"), `<strong>Verification error</strong><br>${error.message}`, true); }
+      finally { node.disabled = false; }
+    };
+  </script>
+</body>
+</html>
+
