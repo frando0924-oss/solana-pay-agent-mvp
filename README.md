@@ -8,6 +8,8 @@ Small, keyless proof of concept for an agent workflow:
 
 The MVP never stores or asks for a private key and never submits a transaction. It only creates a payment request and verifies what the chain reports. The default demo cap is `0.01 SOL`; change it in the caller only after adding an appropriate product-level policy.
 
+The Node module also exposes `createReconciliationLedger()`, a small storage-agnostic layer for registering orders and reconciling confirmed transfers exactly once. It rejects reuse of a transaction signature across orders and expires unpaid requests at the configured timestamp; persist the returned order records in a real database for production use.
+
 ## Run
 
 ```text
@@ -29,7 +31,7 @@ confirmed transaction fields needed to reconcile a payment.
 - Amounts are parsed as integer lamports, avoiding floating-point accounting.
 - The recipient and reference must decode to 32-byte Solana public keys.
 - Verification requires a successful transaction, the exact reference in the account keys, and at least the requested transfer amount to the configured recipient.
-- A real product still needs idempotency, replay protection, durable storage, webhook/API authentication, and a clear refund policy.
+- The in-memory ledger demonstrates idempotency and replay protection; a real product still needs durable storage, webhook/API authentication, and a clear refund policy.
 
 ## ZeroClaw showcase pack
 
@@ -43,4 +45,3 @@ request and verify a confirmed payment, but it cannot hold keys, sign, broadcast
 refund, or choose a destination from untrusted chat text. The operator supplies
 the recipient and RPC endpoint in local configuration, and the human remains the
 approval gate for any money-moving action.
-
