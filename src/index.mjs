@@ -210,3 +210,114 @@ export async function verifyPaymentWithRpc({
   return { ok: false, reason: "no matching confirmed payment found" };
 }
 
+function copyOrder(order) {
+  return order ? { ...order } : null;
+}
+
+/**
+ * Create an in-memory reconciliation ledger for a supervised agent.
+ *
+ * The ledger is deliberately small and storage-agnostic: callers can persist
+ * the returned order shape in their own database, while this layer provides
+ * the important correctness rules for an MVP (idempotency, replay protection,
+ * and expiry). A paid order is never evaluated a second time.
+ */
+export function createReconciliationLedger({ now = () => Date.now() } = {}) {
+  if (typeof now !== "function") throw new Error("now must be a function");
+
+  const orders = new Map();
+  const signatures = new Map();
+
+  function registerOrder({ orderId, recipient, reference, expectedLamports, expiresAt = null }) {
+    if (typeof orderId !== "string" || orderId.trim() === "") {
+      throw new Error("orderId must be a non-empty string");
+    }
+    if (!isValidPublicKey(recipient) || !isValidPublicKey(reference)) {
+      throw new Error("recipient and reference must be valid 32-byte Solana public keys");
+    }
+
+    const expected = BigInt(expectedLamports);
+    if (expected <= 0n) throw new Error("expectedLamports must be greater than zero");
+
+    const normalizedExpiry = expiresAt === null ? null : Number(expiresAt);
+    if (normalizedExpiry !== null && !Number.isFinite(normalizedExpiry)) {
+      throw new Error("expiresAt must be a finite timestamp or null");
+    }
+
+    const existing = orders.get(orderId);
+    if (existing) {
+      const sameOrder =
+        existing.recipient === recipient &&
+        existing.reference === reference &&
+        existing.expectedLamports === expected &&
+        existing.expiresAt === normalizedExpiry;
+      if (!sameOrder) throw new Error("orderId is already registered with different payment details");
+      return copyOrder(existing);
+    }
+
+    const order = {
+      orderId,
+      recipient,
+      reference,
+      expectedLamports: expected,
+      expiresAt: normalizedExpiry,
+      createdAt: now(),
+      status: "pending",
+      signature: null,
+      receivedLamports: 0n,
+      lastReason: null,
+    };
+    orders.set(orderId, order);
+    return copyOrder(order);
+  }
+
+  function reconcileOrder({ orderId, transaction, signature }) {
+    const order = orders.get(orderId);
+    if (!order) throw new Error("orderId is not registered");
+
+    if (order.status === "paid") return { ok: true, replayed: true, order: copyOrder(order) };
+    if (order.status === "expired") return { ok: false, status: "expired", order: copyOrder(order) };
+
+    if (order.expiresAt !== null && now() >= order.expiresAt) {
+      order.status = "expired";
+      order.lastReason = "payment request expired";
+      return { ok: false, status: "expired", order: copyOrder(order) };
+    }
+
+    if (typeof signature !== "string" || signature.trim() === "") {
+      order.lastReason = "signature is required for idempotent reconciliation";
+      return { ok: false, status: "pending", order: copyOrder(order) };
+    }
+
+    const previousOrderId = signatures.get(signature);
+    if (previousOrderId && previousOrderId !== orderId) {
+      order.lastReason = "transaction signature was already reconciled to another order";
+      return { ok: false, status: "rejected", order: copyOrder(order) };
+    }
+
+    const verification = verifyPaymentTransaction({
+      transaction,
+      signature,
+      recipient: order.recipient,
+      reference: order.reference,
+      expectedLamports: order.expectedLamports,
+    });
+    if (!verification.ok) {
+      order.lastReason = verification.reason;
+      return { ok: false, status: "pending", order: copyOrder(order) };
+    }
+
+    order.status = "paid";
+    order.signature = signature;
+    order.receivedLamports = verification.receivedLamports;
+    order.lastReason = null;
+    signatures.set(signature, orderId);
+    return { ok: true, status: "paid", order: copyOrder(order) };
+  }
+
+  return {
+    registerOrder,
+    reconcileOrder,
+    getOrder: (orderId) => copyOrder(orders.get(orderId)),
+  };
+}
