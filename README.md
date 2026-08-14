@@ -17,6 +17,13 @@ npm run demo -- 11111111111111111111111111111111 0.000001 "demo payment"
 
 The CLI prints a `solana:` URI and a generated reference. A production adapter should display the URI as a QR code, then call `verifyPaymentWithRpc` using a server-side RPC URL and the reference returned by `buildPaymentRequest`.
 
+## Live demo
+
+Try the browser MVP at <https://frando0924-oss.github.io/solana-pay-agent-mvp/>.
+It runs without a build step and keeps the same keyless boundary as the Node
+implementation: request creation is unsigned, and verification reads only the
+confirmed transaction fields needed to reconcile a payment.
+
 ## Safety notes
 
 - Amounts are parsed as integer lamports, avoiding floating-point accounting.
